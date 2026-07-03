@@ -15,6 +15,10 @@ function getPlayer() {
   return player;
 }
 
+function getCoupon() {
+  return document.getElementById("coupon").value.trim().toUpperCase();
+}
+
 async function boot() {
   const config = await fetch("/api/config").then(r => r.json());
   ranks = config.ranks;
@@ -61,16 +65,29 @@ function renderPayPal() {
     createOrder: async () => {
       if (!selectedRank) throw new Error("Pick a rank first.");
       const player = getPlayer();
+      const coupon = getCoupon();
 
-      setStatus("Creating PayPal checkout...");
+      setStatus("Creating checkout...");
       const res = await fetch("/api/create-order", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rankId: selectedRank, player })
+        body: JSON.stringify({ rankId: selectedRank, player, coupon })
       });
 
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Could not create PayPal order.");
+
+      if (data.free) {
+        const freeRes = await fetch("/api/redeem-free", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ rankId: selectedRank, player, coupon })
+        });
+        const freeResult = await freeRes.json();
+        setStatus(freeResult.message || freeResult.error || "Free coupon redeemed.");
+        throw new Error("FREE_COUPON_REDEEMED");
+      }
+
       return data.id;
     },
     onApprove: async (data) => {
@@ -85,7 +102,10 @@ function renderPayPal() {
       setStatus(result.message || result.error || "Done.");
     },
     onCancel: () => setStatus("Checkout cancelled."),
-    onError: (err) => setStatus(err.message || "PayPal checkout error.")
+    onError: (err) => {
+      if (err.message === "FREE_COUPON_REDEEMED") return;
+      setStatus(err.message || "PayPal checkout error.");
+    }
   }).render("#paypal-button-container");
 }
 
