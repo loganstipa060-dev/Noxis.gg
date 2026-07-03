@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Noxis Store</title>
+  <link rel="stylesheet" href="/style.css" />
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="bg-glow"></div>
+
+  <header>
+    <div class="brand">
+      <span class="logo">N</span>
+      <div>
+        <h1>NOXIS STORE</h1>
+        <p>PvP ranks • better kits • boosted crate luck</p>
+      </div>
+    </div>
+    <a class="discord" href="#" onclick="alert('Replace this with your Discord invite link in public/index.html')">Discord</a>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div>
+        <h2>Upgrade your Noxis grind.</h2>
+        <p>Pick a rank, enter your Minecraft Java username, and checkout safely through PayPal.</p>
+      </div>
+
+      <div class="player-card">
+        <label for="player">Minecraft Username</label>
+        <input id="player" placeholder="YourJavaName" maxlength="16" />
+        <small>Use your exact Java username.</small>
+
+        <label for="coupon" class="coupon-label">Coupon Code</label>
+        <input id="coupon" placeholder="Optional code" maxlength="32" />
+        <small>Test coupon: <b>TEST100</b></small>
+      </div>
+    </section>
+
+    <section id="ranks" class="rank-grid"></section>
+
+    <section class="checkout">
+      <h3>Checkout</h3>
+      <p id="selected">Select a rank first.</p>
+      <div id="paypal-button-container"></div>
+      <p id="status"></p>
+    </section>
+  </main>
+
+  <footer>
+    Noxis is not affiliated with Mojang, Microsoft, PayPal, or CraftingStore.
+  </footer>
+</body>
+</html>
