@@ -26,10 +26,22 @@ const ranks = {
   noxis: { name: "Noxis", price: "75.00", color: "#ff0000", desc: "Ultimate rank, strongest kit, best gear, and max crate luck." }
 };
 
+const coupons = {
+  TEST100: { percentOff: 100 }
+};
+
 function cleanPlayerName(name) {
   const cleaned = String(name || "").replace(/[^a-zA-Z0-9_]/g, "");
   if (cleaned.length < 3 || cleaned.length > 16) throw new Error("Invalid Minecraft Java username.");
   return cleaned;
+}
+
+function getDiscountedPrice(rank, couponCode) {
+  const coupon = coupons[String(couponCode || "").trim().toUpperCase()];
+  if (!coupon) return { price: rank.price, appliedCoupon: null };
+  const original = Number(rank.price);
+  const discounted = Math.max(0, original * (1 - coupon.percentOff / 100));
+  return { price: discounted.toFixed(2), appliedCoupon: coupon };
 }
 
 async function paypalAccessToken() {
@@ -52,11 +64,35 @@ async function paypalAccessToken() {
   return data.access_token;
 }
 
+async function deliverRank(player, rankId, couponCode = null) {
+  const command = `rank set ${player} ${rankId}`;
+  let delivery = "Rank delivery endpoint is not configured yet.";
+
+  if (process.env.MINECRAFT_RANK_ENDPOINT && process.env.MINECRAFT_RANK_SECRET) {
+    try {
+      const mcRes = await fetch(process.env.MINECRAFT_RANK_ENDPOINT, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Noxis-Secret": process.env.MINECRAFT_RANK_SECRET
+        },
+        body: JSON.stringify({ player, rank: rankId, command, coupon: couponCode })
+      });
+      delivery = mcRes.ok ? "Rank delivery sent to the server." : "The Minecraft server rejected delivery.";
+    } catch {
+      delivery = "The Minecraft server could not be reached.";
+    }
+  }
+
+  return { command, delivery };
+}
+
 app.get("/api/config", (req, res) => {
   res.json({
     paypalClientId: process.env.PAYPAL_CLIENT_ID || "",
     paypalEnv: PAYPAL_ENV,
-    ranks
+    ranks,
+    coupons: Object.keys(coupons)
   });
 });
 
@@ -64,8 +100,15 @@ app.post("/api/create-order", async (req, res) => {
   try {
     const rankId = String(req.body.rankId || "").toLowerCase();
     const player = cleanPlayerName(req.body.player);
+    const couponCode = String(req.body.coupon || "").trim().toUpperCase();
     const rank = ranks[rankId];
     if (!rank) return res.status(400).json({ error: "Invalid rank." });
+
+    const { price, appliedCoupon } = getDiscountedPrice(rank, couponCode);
+
+    if (Number(price) === 0) {
+      return res.json({ free: true, player, rankId, coupon: couponCode, message: "Free coupon accepted." });
+    }
 
     const token = await paypalAccessToken();
     const orderRes = await fetch(`${PAYPAL_BASE}/v2/checkout/orders`, {
@@ -77,9 +120,9 @@ app.post("/api/create-order", async (req, res) => {
       body: JSON.stringify({
         intent: "CAPTURE",
         purchase_units: [{
-          custom_id: JSON.stringify({ player, rankId }),
+          custom_id: JSON.stringify({ player, rankId, coupon: appliedCoupon ? couponCode : null }),
           description: `Noxis ${rank.name} rank for ${player}`,
-          amount: { currency_code: "USD", value: rank.price }
+          amount: { currency_code: "USD", value: price }
         }]
       })
     });
@@ -89,6 +132,27 @@ app.post("/api/create-order", async (req, res) => {
     res.json({ id: order.id });
   } catch (err) {
     res.status(400).json({ error: err.message });
+  }
+});
+
+app.post("/api/redeem-free", async (req, res) => {
+  try {
+    const rankId = String(req.body.rankId || "").toLowerCase();
+    const player = cleanPlayerName(req.body.player);
+    const couponCode = String(req.body.coupon || "").trim().toUpperCase();
+
+    const rank = ranks[rankId];
+    if (!rank) return res.status(400).json({ error: "Invalid rank." });
+
+    const { price, appliedCoupon } = getDiscountedPrice(rank, couponCode);
+    if (!appliedCoupon || Number(price) !== 0) {
+      return res.status(400).json({ error: "Invalid 100% off coupon." });
+    }
+
+    const { command, delivery } = await deliverRank(player, rankId, couponCode);
+    res.json({ ok: true, message: `Coupon ${couponCode} applied. ${delivery}`, command });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -117,25 +181,7 @@ app.post("/api/capture-order", async (req, res) => {
     const rankId = String(custom.rankId || "").toLowerCase();
     if (!ranks[rankId]) return res.status(400).json({ error: "Invalid paid rank." });
 
-    const command = `rank set ${player} ${rankId}`;
-
-    let delivery = "Payment complete, but Minecraft delivery endpoint is not configured.";
-    if (process.env.MINECRAFT_RANK_ENDPOINT && process.env.MINECRAFT_RANK_SECRET) {
-      try {
-        const mcRes = await fetch(process.env.MINECRAFT_RANK_ENDPOINT, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Noxis-Secret": process.env.MINECRAFT_RANK_SECRET
-          },
-          body: JSON.stringify({ player, rank: rankId, command })
-        });
-        delivery = mcRes.ok ? "Rank delivery sent to the server." : "Payment complete, but the Minecraft server rejected delivery.";
-      } catch {
-        delivery = "Payment complete, but the Minecraft server could not be reached.";
-      }
-    }
-
+    const { command, delivery } = await deliverRank(player, rankId, custom.coupon || null);
     res.json({ ok: true, message: `Payment complete for ${player}. ${delivery}`, command });
   } catch (err) {
     res.status(500).json({ error: err.message });
