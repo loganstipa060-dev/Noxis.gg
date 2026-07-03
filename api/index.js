@@ -1,0 +1,247 @@
+import express from "express";
+import cors from "cors";
+import dotenv from "dotenv";
+
+dotenv.config();
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+const PAYPAL_ENV = process.env.PAYPAL_ENV || "sandbox";
+const PAYPAL_BASE =
+  PAYPAL_ENV === "live"
+    ? "https://api-m.paypal.com"
+    : "https://api-m.sandbox.paypal.com";
+
+const ranks = {
+  ash: { name: "Ash", price: "5.00", color: "#7d7d7d", desc: "Starter PvP gear, Ash Kit, and a small crate luck boost." },
+  crimson: { name: "Crimson", price: "10.00", color: "#d71920", desc: "Stronger gear, Crimson Kit, and better rare crate odds." },
+  blood: { name: "Blood", price: "15.00", color: "#b00000", desc: "Powerful PvP gear, Blood Kit, and boosted epic rewards." },
+  phantom: { name: "Phantom", price: "20.00", color: "#8f6bff", desc: "Enhanced weapons, Phantom Kit, and improved crate luck." },
+  void: { name: "Void", price: "25.00", color: "#3e1e78", desc: "Elite equipment, Void Kit, and high-value crate chances." },
+  reaper: { name: "Reaper", price: "30.00", color: "#ffffff", desc: "Top-tier gear, Reaper Kit, and strong legendary odds." },
+  inferno: { name: "Inferno", price: "35.00", color: "#ff5a00", desc: "Devastating gear, Inferno Kit, and premium reward chances." },
+  wraith: { name: "Wraith", price: "40.00", color: "#00d4ff", desc: "Near-best gear, Wraith Kit, and one of the highest crate boosts." },
+  overlord: { name: "Overlord", price: "50.00", color: "#ffd700", desc: "Elite battlefield gear, Overlord Kit, and rarest loot chances." },
+  noxis: { name: "Noxis", price: "75.00", color: "#ff0000", desc: "Ultimate rank, strongest kit, best gear, and max crate luck." }
+};
+
+const coupons = {
+  TEST100: { percentOff: 100 }
+};
+
+function cleanPlayerName(name) {
+  const cleaned = String(name || "").replace(/[^a-zA-Z0-9_]/g, "");
+  if (cleaned.length < 3 || cleaned.length > 16) {
+    throw new Error("Invalid Minecraft Java username.");
+  }
+  return cleaned;
+}
+
+function getDiscountedPrice(rank, couponCode) {
+  const code = String(couponCode || "").trim().toUpperCase();
+  const coupon = coupons[code];
+  if (!coupon) return { price: rank.price, appliedCoupon: null, code: "" };
+
+  const original = Number(rank.price);
+  const discounted = Math.max(0, original * (1 - coupon.percentOff / 100));
+  return { price: discounted.toFixed(2), appliedCoupon: coupon, code };
+}
+
+async function paypalAccessToken() {
+  if (!process.env.PAYPAL_CLIENT_ID || !process.env.PAYPAL_CLIENT_SECRET) {
+    throw new Error("PayPal keys are missing.");
+  }
+
+  const auth = Buffer.from(`${process.env.PAYPAL_CLIENT_ID}:${process.env.PAYPAL_CLIENT_SECRET}`).toString("base64");
+
+  const res = await fetch(`${PAYPAL_BASE}/v1/oauth2/token`, {
+    method: "POST",
+    headers: {
+      Authorization: `Basic ${auth}`,
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    body: "grant_type=client_credentials"
+  });
+
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.error_description || "Could not connect to PayPal.");
+  }
+
+  return data.access_token;
+}
+
+async function deliverRank(player, rankId, couponCode = null) {
+  const command = `rank set ${player} ${rankId}`;
+
+  if (!process.env.MINECRAFT_RANK_ENDPOINT || !process.env.MINECRAFT_RANK_SECRET) {
+    return {
+      command,
+      delivery: "Rank delivery endpoint is not configured yet. This is normal until you connect your Fabric server."
+    };
+  }
+
+  try {
+    const mcRes = await fetch(process.env.MINECRAFT_RANK_ENDPOINT, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Noxis-Secret": process.env.MINECRAFT_RANK_SECRET
+      },
+      body: JSON.stringify({ player, rank: rankId, command, coupon: couponCode })
+    });
+
+    return {
+      command,
+      delivery: mcRes.ok ? "Rank delivery sent to the server." : "The Minecraft server rejected delivery."
+    };
+  } catch {
+    return {
+      command,
+      delivery: "The Minecraft server could not be reached."
+    };
+  }
+}
+
+app.get("/api/config", (req, res) => {
+  res.json({
+    paypalClientId: process.env.PAYPAL_CLIENT_ID || "",
+    paypalEnv: PAYPAL_ENV,
+    ranks,
+    coupons: Object.keys(coupons)
+  });
+});
+
+app.post("/api/create-order", async (req, res) => {
+  try {
+    const rankId = String(req.body.rankId || "").toLowerCase();
+    const player = cleanPlayerName(req.body.player);
+    const couponCode = String(req.body.coupon || "").trim().toUpperCase();
+
+    const rank = ranks[rankId];
+    if (!rank) return res.status(400).json({ error: "Invalid rank." });
+
+    const { price, appliedCoupon, code } = getDiscountedPrice(rank, couponCode);
+
+    if (Number(price) === 0) {
+      return res.json({
+        free: true,
+        player,
+        rankId,
+        coupon: code,
+        message: "Free coupon accepted."
+      });
+    }
+
+    const token = await paypalAccessToken();
+
+    const orderRes = await fetch(`${PAYPAL_BASE}/v2/checkout/orders`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        intent: "CAPTURE",
+        purchase_units: [
+          {
+            custom_id: JSON.stringify({ player, rankId, coupon: appliedCoupon ? code : null }),
+            description: `Noxis ${rank.name} rank for ${player}`,
+            amount: {
+              currency_code: "USD",
+              value: price
+            }
+          }
+        ]
+      })
+    });
+
+    const order = await orderRes.json();
+    if (!orderRes.ok) {
+      return res.status(500).json({ error: "PayPal order failed.", details: order });
+    }
+
+    res.json({ id: order.id });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post("/api/redeem-free", async (req, res) => {
+  try {
+    const rankId = String(req.body.rankId || "").toLowerCase();
+    const player = cleanPlayerName(req.body.player);
+    const couponCode = String(req.body.coupon || "").trim().toUpperCase();
+
+    const rank = ranks[rankId];
+    if (!rank) return res.status(400).json({ error: "Invalid rank." });
+
+    const { price, appliedCoupon, code } = getDiscountedPrice(rank, couponCode);
+    if (!appliedCoupon || Number(price) !== 0) {
+      return res.status(400).json({ error: "Invalid 100% off coupon." });
+    }
+
+    const { command, delivery } = await deliverRank(player, rankId, code);
+    res.json({
+      ok: true,
+      message: `Coupon ${code} applied. ${delivery}`,
+      command
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/capture-order", async (req, res) => {
+  try {
+    const orderId = String(req.body.orderId || "");
+    const token = await paypalAccessToken();
+
+    const captureRes = await fetch(`${PAYPAL_BASE}/v2/checkout/orders/${orderId}/capture`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json"
+      }
+    });
+
+    const capture = await captureRes.json();
+    if (!captureRes.ok) {
+      return res.status(500).json({ error: "PayPal capture failed.", details: capture });
+    }
+
+    const unit = capture.purchase_units?.[0];
+    const status = unit?.payments?.captures?.[0]?.status;
+
+    if (status !== "COMPLETED") {
+      return res.status(400).json({ error: "Payment was not completed." });
+    }
+
+    const custom = JSON.parse(unit.custom_id);
+    const player = cleanPlayerName(custom.player);
+    const rankId = String(custom.rankId || "").toLowerCase();
+
+    if (!ranks[rankId]) {
+      return res.status(400).json({ error: "Invalid paid rank." });
+    }
+
+    const { command, delivery } = await deliverRank(player, rankId, custom.coupon || null);
+
+    res.json({
+      ok: true,
+      message: `Payment complete for ${player}. ${delivery}`,
+      command
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+export default app;
+
+if (process.env.NODE_ENV !== "production") {
+  const port = process.env.PORT || 3000;
+  app.listen(port, () => console.log(`Noxis store running on http://localhost:${port}`));
+}
